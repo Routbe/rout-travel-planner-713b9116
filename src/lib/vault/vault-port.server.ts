@@ -46,6 +46,12 @@ export type SdmTapChallenge = {
 };
 export type SdmTapPurpose = "public_proof" | "step_up";
 export type SdmCardState = "active" | "unactivated";
+/** What a card step-up proof will cover: one card action, or general sensitive actions. */
+export type CardStepUpScope = "*" | "card_reveal" | "card_lifecycle";
+export const CARD_STEP_UP_SCOPES: readonly CardStepUpScope[] = ["*", "card_reveal", "card_lifecycle"];
+/** Single-use intent ref minted by the database; the browser only ever holds it in an HttpOnly cookie. */
+export type CardStepUpIntent = string & { readonly __cardStepUpIntent: true };
+export const isCardStepUpIntent = (v: unknown): v is CardStepUpIntent => typeof v === "string" && /^csu_[0-9a-f]{64}$/.test(v);
 export type SdmBatchSummary = {
   readonly batchId: string;
   readonly fleetId: string;
@@ -107,6 +113,16 @@ export interface IVaultPort {
   consumeSdmTap(caller: VaultCaller | null, grant: TapGrant, purpose: SdmTapPurpose): Promise<SdmCardState | null>;
   /** Spends a tap_ grant to link an unclaimed card to the caller (db/0246); false on every denial. */
   activateMemberCard(caller: VaultCaller, grant: TapGrant, activationHash: Uint8Array | null): Promise<boolean>;
+  /** Whether the caller owns an activated, unrevoked ROUT Card (db/0250). */
+  memberCardFactor(caller: VaultCaller): Promise<boolean>;
+  /** Opens the caller's single-use card step-up intent (300 s); null when they own no active card. */
+  beginCardStepUp(caller: VaultCaller, scope: CardStepUpScope): Promise<CardStepUpIntent | null>;
+  /** Whether the caller has an open card step-up intent. */
+  pendingCardStepUp(caller: VaultCaller): Promise<boolean>;
+  /** Spends a tap_ grant for step_up (owner only) and completes the caller's open intent, atomically. */
+  completeCardStepUp(caller: VaultCaller, grant: TapGrant): Promise<boolean>;
+  /** Claims a completed intent once; returns its scope, or null (not yet completed or denied). */
+  claimCardStepUp(caller: VaultCaller, intent: CardStepUpIntent): Promise<CardStepUpScope | null>;
   /** Admin: batches with card counts, no key material. */
   listSdmBatches(caller: VaultCaller): Promise<SdmBatchSummary[]>;
   /** Admin: pins a personalisation station by its raw P-256 public key (db/0248). */
@@ -414,6 +430,36 @@ export class LocalPostgresVaultAdapter implements IVaultPort {
       { serializable: true },
     );
     return rows[0]?.["ok"] === true;
+  }
+
+  async memberCardFactor(caller: VaultCaller): Promise<boolean> {
+    const rows = await this.exec(callerId(caller), "select vault_enclave.member_card_factor() as ok", []);
+    return rows[0]?.["ok"] === true;
+  }
+
+  async beginCardStepUp(caller: VaultCaller, scope: CardStepUpScope): Promise<CardStepUpIntent | null> {
+    if (!CARD_STEP_UP_SCOPES.includes(scope)) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.begin_card_step_up($1) as ref", [scope], { serializable: true });
+    const ref = rows[0]?.["ref"];
+    return isCardStepUpIntent(ref) ? ref : null;
+  }
+
+  async pendingCardStepUp(caller: VaultCaller): Promise<boolean> {
+    const rows = await this.exec(callerId(caller), "select vault_enclave.pending_card_step_up() as ok", []);
+    return rows[0]?.["ok"] === true;
+  }
+
+  async completeCardStepUp(caller: VaultCaller, grant: TapGrant): Promise<boolean> {
+    if (!isTapGrant(grant)) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.complete_card_step_up($1) as ok", [grant], { serializable: true });
+    return rows[0]?.["ok"] === true;
+  }
+
+  async claimCardStepUp(caller: VaultCaller, intent: CardStepUpIntent): Promise<CardStepUpScope | null> {
+    if (!isCardStepUpIntent(intent)) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.claim_card_step_up($1) as scope", [intent], { serializable: true });
+    const scope = rows[0]?.["scope"];
+    return CARD_STEP_UP_SCOPES.includes(scope as CardStepUpScope) ? (scope as CardStepUpScope) : null;
   }
 
   async listSdmBatches(caller: VaultCaller): Promise<SdmBatchSummary[]> {
