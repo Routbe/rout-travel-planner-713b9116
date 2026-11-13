@@ -104,7 +104,13 @@ export class VaultDeniedError extends Error {
 }
 
 /** Runs one statement as `userId` (transaction-scoped context) and returns its rows. */
-export type VaultSqlExecutor = (userId: string, query: string, params: readonly unknown[]) => Promise<readonly Record<string, unknown>[]>;
+/** `serializable` asks for SERIALIZABLE isolation with retry on 40001/40P01. */
+export type VaultSqlExecutor = (
+  userId: string,
+  query: string,
+  params: readonly unknown[],
+  opts?: { serializable?: boolean },
+) => Promise<readonly Record<string, unknown>[]>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX_RE = /^[0-9a-f]*$/;
@@ -198,9 +204,10 @@ function callerId(caller: VaultCaller): string {
   return id;
 }
 
-async function defaultExecutor(userId: string, query: string, params: readonly unknown[]) {
-  const { runQuery, withDbContext } = await import("@/lib/neon");
-  return (await withDbContext({ userId, workspaceId: null }, () => runQuery(query, [...params]))).rows;
+async function defaultExecutor(userId: string, query: string, params: readonly unknown[], opts?: { serializable?: boolean }) {
+  const { runQuery, runSerializable, withDbContext } = await import("@/lib/neon");
+  const run = opts?.serializable ? runSerializable : runQuery;
+  return (await withDbContext({ userId, workspaceId: null }, () => run(query, [...params]))).rows;
 }
 
 export class LocalPostgresVaultAdapter implements IVaultPort {
@@ -367,7 +374,7 @@ export class LocalPostgresVaultAdapter implements IVaultPort {
 
   async consumeSdmTap(caller: VaultCaller | null, grant: TapGrant, purpose: SdmTapPurpose): Promise<SdmCardState | null> {
     if (!isTapGrant(grant) || (purpose !== "public_proof" && purpose !== "step_up")) throw new VaultDeniedError();
-    const rows = await this.exec(caller ? callerId(caller) : NO_CALLER, "select granted, card_state from vault_enclave.consume_sdm_tap($1, $2)", [grant, purpose]);
+    const rows = await this.exec(caller ? callerId(caller) : NO_CALLER, "select granted, card_state from vault_enclave.consume_sdm_tap($1, $2)", [grant, purpose], { serializable: true });
     const row = z.object({ granted: z.boolean(), card_state: z.enum(["active", "unactivated"]).nullable() }).safeParse(rows[0]);
     return row.success && row.data.granted && row.data.card_state ? row.data.card_state : null;
   }
@@ -378,6 +385,7 @@ export class LocalPostgresVaultAdapter implements IVaultPort {
       callerId(caller),
       "select vault_enclave.activate_member_card($1, case when $2::text is null then null else decode($2, 'hex') end) as ok",
       [grant, activationHash ? toHex(activationHash) : null],
+      { serializable: true },
     );
     return rows[0]?.["ok"] === true;
   }

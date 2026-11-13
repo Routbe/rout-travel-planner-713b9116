@@ -75,10 +75,10 @@ function gatewayHeaders(): Record<string, string> {
   };
 }
 
-async function post(body: unknown): Promise<any> {
+async function post(body: unknown, extraHeaders: Record<string, string> = {}): Promise<any> {
   const res = await fetch(GATEWAY_URL, {
     method: "POST",
-    headers: gatewayHeaders(),
+    headers: { ...gatewayHeaders(), ...extraHeaders },
     body: JSON.stringify(body),
   });
   const text = await res.text();
@@ -118,7 +118,7 @@ export async function runQuery(query: string, params: unknown[] = []): Promise<G
 /** One gateway request is one PostgreSQL transaction, never an interactive callback. */
 export async function runBatch(
   input: Statement[],
-  opts: { withContext?: boolean } = {},
+  opts: { withContext?: boolean; isolation?: "Serializable" } = {},
 ): Promise<GatewayResult[]> {
   for (const statement of input) {
     if (TRANSACTION_CONTROL.test(statement.query)) throw new Error("interactive_transactions_unsupported: use one atomic PostgreSQL batch");
@@ -139,7 +139,11 @@ export async function runBatch(
       // The identical atomic role/context/guard prefix applies to both paths.
       // An owner URL never gets permission to query as the owner.
       const client = directNeon(connectionString, { fullResults: true });
-      const results = await client.transaction(queries.map(s => client.query(s.query, s.params)));
+      // isolationLevel makes the driver open the batch with BEGIN ISOLATION LEVEL SERIALIZABLE.
+      const results = await client.transaction(
+        queries.map(s => client.query(s.query, s.params)),
+        opts.isolation ? { isolationLevel: opts.isolation } : undefined,
+      );
       json = { results: results.map(r => ({ rows: r.rows as Row[], rowCount: r.rowCount, command: r.command })) };
     } catch (cause) {
       const code = (cause as { code?: unknown })?.code;
@@ -148,7 +152,7 @@ export async function runBatch(
       throw Object.assign(new Error(GENERIC_TEMPORARY_ERROR), { code: safeCode });
     }
   } else {
-    json = await post({ queries });
+    json = await post({ queries }, opts.isolation ? { "Neon-Batch-Isolation-Level": opts.isolation } : {});
   }
   if (!Array.isArray(json.results) || json.results.length !== prefix.length + input.length) {
     throw new Error("Invalid Neon transaction response");
@@ -157,6 +161,19 @@ export async function runBatch(
 }
 
 export const withPostgresTransaction = runBatch;
+
+/**
+ * One statement in a SERIALIZABLE transaction, re-run with exponential backoff
+ * only on 40001/40P01 (PostgreSQL rolled it back, so a retry cannot double-apply).
+ */
+export async function runSerializable(query: string, params: unknown[] = []): Promise<GatewayResult> {
+  const { withSerializableRetry } = await import("@/lib/db-retry");
+  return withSerializableRetry(async () => {
+    const [result] = await runBatch([{ query, params }], { isolation: "Serializable" });
+    if (!result) throw new Error("Neon returned no statement result");
+    return result;
+  });
+}
 const TRANSACTION_CONTROL = /^\s*(?:begin|commit|rollback|start\s+transaction|end|savepoint|release\s+savepoint)\b/i;
 
 /** Lazy query: executes when awaited, or as part of `sql.transaction([...])`. */

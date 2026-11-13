@@ -13,3 +13,5 @@
 ## Workspace Studio
 - [ ] New profile photo does not save in Workspace Studio (e.g. maximilien-6yak, private account switched to workspace)
 - [x] "ROUT OS v2.5 Alle systemen operationeel" overlaps bottom preview buttons on phone; check similar overlaps
+
+- [x] 0247 hardening (code+tests done; Neon apply awaits review): constant-time activation-hash compare, SERIALIZABLE + retry for consume/activate, deny-all RLS on vault_enclave (review before apply)
