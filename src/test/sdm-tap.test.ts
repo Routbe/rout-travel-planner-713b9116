@@ -235,4 +235,39 @@ describe("db/0246 card activation", () => {
     for (const key of [META, UID_INDEX, MASTER]) expect(text).not.toContain(hex(key));
     await expect(asApp(ADMIN, "select * from vault_enclave.sdm_batch_cards", [])).rejects.toThrow(/permission denied/);
   });
+
+  it("0247: compares activation hashes in constant time, all 32 bytes", async () => {
+    const eq = async (a: string | null, b: string | null) =>
+      (await db.query<{ ok: boolean }>("select vault_enclave.ct_equal_32(decode($1,'hex'), decode($2,'hex')) as ok", [a, b])).rows[0]?.ok;
+    const x = "ab".repeat(32);
+    expect(await eq(x, x)).toBe(true);
+    expect(await eq(x, "ab".repeat(31) + "aa")).toBe(false);
+    expect(await eq(x, "aa" + "ab".repeat(31))).toBe(false);
+    expect(await eq(x, "ab".repeat(16))).toBe(false);
+    expect(await eq(null, null)).toBe(false);
+    expect(await eq("00".repeat(32), null)).toBe(false);
+    const src = (await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'activate_member_card'")).rows[0]?.src ?? "";
+    expect(src).toContain("ct_equal_32");
+    expect(src).not.toMatch(/activation_hash\s*(<>|=|!=)\s*v_card/);
+    await expect(asApp(ADMIN, "select vault_enclave.ct_equal_32('\\x00', '\\x00')", [])).rejects.toThrow(/permission denied/);
+  });
+
+  it("0247: every vault_enclave table has RLS and a restrictive deny-all policy, even after an accidental grant", async () => {
+    const rows = (await db.query<{ t: string; rls: boolean; deny: boolean }>(
+      `select c.relname as t, c.relrowsecurity as rls,
+              exists(select 1 from pg_policy p where p.polrelid = c.oid and p.polname = 'deny_all' and not p.polpermissive) as deny
+         from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'vault_enclave' and c.relkind in ('r','p')`,
+    )).rows;
+    expect(rows.length).toBeGreaterThanOrEqual(11);
+    for (const r of rows) expect(r, r.t).toMatchObject({ rls: true, deny: true });
+    await db.exec("grant usage on schema vault_enclave to rout_app; grant select on vault_enclave.sdm_batch_cards to rout_app");
+    try {
+      const leaked = await asApp(ADMIN, "select * from vault_enclave.sdm_batch_cards", []);
+      expect(leaked).toEqual([]);
+    } finally {
+      await db.exec("revoke select on vault_enclave.sdm_batch_cards from rout_app");
+    }
+    expect(await listSdmBatches(ADMIN, deps)).not.toEqual([]);
+  });
 });
