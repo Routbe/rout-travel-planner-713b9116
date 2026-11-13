@@ -240,36 +240,61 @@ export function listSdmBatches(adminId: string, deps: Deps = {}): Promise<SdmBat
   return (deps.port ?? vaultPort()).listSdmBatches({ userId: adminId });
 }
 
+/** 3-byte little-endian, as NTAG 424 DNA file settings carry offsets. */
+const le24 = (n: number) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff];
+
+/**
+ * NDEF file 2 for the tap URL (NFC Forum Type 4): NLEN (2) + short URI record
+ * D1 01 <len> 55 + prefix 0x04 ("https://") + URL body. Offsets are positions
+ * inside this file, which is what the SDM mirror offsets refer to.
+ */
+export function sdmNdefFile(origin = "https://rout.be") {
+  const url = `${origin.replace(/\/$/, "")}/t?p=${"0".repeat(32)}&m=${"0".repeat(16)}`;
+  if (!url.startsWith("https://")) throw new TypeError("sdm_origin_not_https");
+  const body = new TextEncoder().encode(url.slice("https://".length));
+  const payloadLength = 1 + body.length; // prefix code + body
+  if (payloadLength > 255) throw new TypeError("sdm_url_too_long");
+  const record = [0xd1, 0x01, payloadLength, 0x55, 0x04, ...body];
+  const file = Uint8Array.from([(record.length >> 8) & 0xff, record.length & 0xff, ...record]);
+  const bodyAt = 2 + 4 + 1;
+  const text = url.slice("https://".length);
+  return { url, file, piccOffset: bodyAt + text.indexOf("p=") + 2, macOffset: bodyAt + text.indexOf("m=") + 2 };
+}
+
 /**
  * NTAG 424 DNA personalisation settings for the writing station (AN12196 SUN):
- * the NDEF URL template with mirror offsets and the key slots. It carries no
- * key bytes: keys are injected by the station's own secure key loading, so a
- * leaked file grants nothing.
+ * the NDEF file, the ChangeFileSettings payload for file 2 and the key slots.
+ * It carries no key bytes: a leaked file grants nothing.
+ *
+ * File settings (NT4H2421 / AN12196): FileOption 0x40 (SDM on, plain comm),
+ * AccessRights 00 E0 (read free, write/RW/change key 0), SDMOptions 0xC1 (UID
+ * and read counter inside the encrypted PICCData, ASCII), SDMAccessRights
+ * FF 12 (no plain counter read, MetaRead key 1, FileRead key 2), then
+ * PICCDataOffset, SDMMACInputOffset and SDMMACOffset (MAC input = MAC offset,
+ * so the CMAC covers no file data; matches sdm-verifier).
  */
 export function stationConfig(batchId: string, origin = "https://rout.be") {
-  const base = `${origin.replace(/\/$/, "")}/t?p=`;
-  const piccPlaceholder = "0".repeat(32);
-  const url = `${base}${piccPlaceholder}&m=${"0".repeat(16)}`;
-  // NDEF file 2 layout: NLEN (2) + record header (5) + URI prefix code (1), then the URL without "https://".
-  const ndefHeader = 2 + 5;
-  const urlBody = url.replace(/^https:\/\//, "");
-  const piccOffset = ndefHeader + 1 + urlBody.indexOf("p=") + 2;
-  const macOffset = ndefHeader + 1 + urlBody.indexOf("m=") + 2;
+  const ndef = sdmNdefFile(origin);
+  const fileSettings = Uint8Array.from([0x40, 0x00, 0xe0, 0xc1, 0xff, 0x12, ...le24(ndef.piccOffset), ...le24(ndef.macOffset), ...le24(ndef.macOffset)]);
   return {
-    format: "rout-sdm-station/v1",
+    format: "rout-sdm-station/v2",
     batchId,
     chip: "NTAG 424 DNA",
-    ndef: { fileNo: 2, uriPrefix: "https://", urlTemplate: url },
+    ndef: { fileNo: 2, uriPrefix: "https://", urlTemplate: ndef.url, fileHex: toHex(ndef.file), fileLength: ndef.file.length },
+    changeFileSettings: { fileNo: 2, commMode: "full (key 0)", payloadHex: toHex(fileSettings) },
     sdm: {
       enabled: true,
       asciiEncoding: true,
-      uidMirror: false,
-      readCounterMirror: false,
-      encryptedPiccData: { offset: piccOffset, length: 32, keyNo: 1, key: "K_SDMMetaRead (fleet)" },
-      sdmMac: { offset: macOffset, macInputOffset: macOffset, length: 16, keyNo: 2, key: "K_SDMFileRead = AN10922(batch master, UID || batch id)" },
+      // Mirrored inside the encrypted PICCData (tag 0xC7), never in plain text.
+      uidInPiccData: true,
+      readCounterInPiccData: true,
+      plainCounterRead: false,
+      encryptedPiccData: { offset: ndef.piccOffset, length: 32, keyNo: 1, key: "K_SDMMetaRead (fleet)" },
+      sdmMac: { offset: ndef.macOffset, macInputOffset: ndef.macOffset, length: 16, keyNo: 2, key: "K_SDMFileRead = AN10922(batch master, UID || batch id)" },
       readCounterLimit: null,
     },
     access: { read: "free", write: "key 0", readWrite: "key 0", change: "key 0", keyNo0: "card master (station)" },
+    manifest: { format: "one line per chip: UID (14 hex)[,activation code]", maxCards: 5000 },
   } as const;
 }
 
