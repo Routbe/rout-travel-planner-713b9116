@@ -26762,7 +26762,7 @@
         {
           "name": "audit_logs_action_check",
           "kind": "c",
-          "def": "CHECK ((action = ANY (ARRAY['step_up_register'::text, 'token_store'::text, 'token_retrieve'::text, 'server_key_register'::text, 'sdm_card_register'::text, 'sdm_recovery_retrieve'::text, 'sdm_recovery_confirm'::text, 'sdm_fleet_register'::text, 'sdm_batch_register'::text, 'sdm_batch_cards_register'::text, 'sdm_tap_begin'::text, 'sdm_tap_confirm'::text, 'sdm_tap_consume'::text, 'sdm_card_activate'::text, 'sdm_batch_list'::text, 'sdm_batch_export'::text])))"
+          "def": "CHECK ((action = ANY (ARRAY['step_up_register'::text, 'token_store'::text, 'token_retrieve'::text, 'server_key_register'::text, 'sdm_card_register'::text, 'sdm_recovery_retrieve'::text, 'sdm_recovery_confirm'::text, 'sdm_fleet_register'::text, 'sdm_batch_register'::text, 'sdm_batch_cards_register'::text, 'sdm_tap_begin'::text, 'sdm_tap_confirm'::text, 'sdm_tap_consume'::text, 'sdm_card_activate'::text, 'sdm_batch_list'::text, 'sdm_batch_export'::text, 'sdm_station_register'::text, 'sdm_station_list'::text, 'sdm_station_retire'::text])))"
         },
         {
           "name": "audit_logs_entry_hash_key",
@@ -27483,6 +27483,122 @@
         "CREATE INDEX sdm_attempts_card_idx ON vault_enclave.sdm_recovery_attempts USING btree (card_id, started_at)",
         "CREATE INDEX sdm_attempts_owner_idx ON vault_enclave.sdm_recovery_attempts USING btree (owner_user_id, started_at)"
       ],
+      "triggers": [],
+      "rls": true,
+      "forceRls": false,
+      "policies": [
+        {
+          "name": "deny_all",
+          "permissive": false,
+          "roles": [
+            "public"
+          ],
+          "cmd": "ALL",
+          "using": "false",
+          "check": "false"
+        }
+      ],
+      "grants": {}
+    },
+    {
+      "schema": "vault_enclave",
+      "name": "sdm_stations",
+      "columns": [
+        {
+          "name": "station_id",
+          "type": "uuid",
+          "notNull": true,
+          "default": "gen_random_uuid()",
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "label",
+          "type": "text",
+          "notNull": true,
+          "default": null,
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "public_key",
+          "type": "bytea",
+          "notNull": true,
+          "default": null,
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "fingerprint",
+          "type": "bytea",
+          "notNull": true,
+          "default": null,
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "registered_by",
+          "type": "uuid",
+          "notNull": true,
+          "default": null,
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "notNull": true,
+          "default": "clock_timestamp()",
+          "identity": null,
+          "generated": null
+        },
+        {
+          "name": "retired_at",
+          "type": "timestamp with time zone",
+          "notNull": false,
+          "default": null,
+          "identity": null,
+          "generated": null
+        }
+      ],
+      "constraints": [
+        {
+          "name": "sdm_stations_fingerprint",
+          "kind": "c",
+          "def": "CHECK ((fingerprint = sha256(public_key)))"
+        },
+        {
+          "name": "sdm_stations_fingerprint_key",
+          "kind": "u",
+          "def": "UNIQUE (fingerprint)"
+        },
+        {
+          "name": "sdm_stations_key",
+          "kind": "c",
+          "def": "CHECK (((octet_length(public_key) = 65) AND (get_byte(public_key, 0) = 4)))"
+        },
+        {
+          "name": "sdm_stations_label",
+          "kind": "c",
+          "def": "CHECK (((char_length(label) >= 1) AND (char_length(label) <= 80)))"
+        },
+        {
+          "name": "sdm_stations_pkey",
+          "kind": "p",
+          "def": "PRIMARY KEY (station_id)"
+        },
+        {
+          "name": "sdm_stations_public_key_key",
+          "kind": "u",
+          "def": "UNIQUE (public_key)"
+        },
+        {
+          "name": "sdm_stations_registered_by_fkey",
+          "kind": "f",
+          "def": "FOREIGN KEY (registered_by) REFERENCES users(id) ON DELETE RESTRICT"
+        }
+      ],
+      "indexes": [],
       "triggers": [],
       "rls": true,
       "forceRls": false,
@@ -30200,9 +30316,21 @@
     },
     {
       "schema": "vault_enclave",
+      "name": "list_sdm_stations",
+      "args": "",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.list_sdm_stations()\n RETURNS TABLE(station_id uuid, label text, fingerprint bytea, created_at timestamp with time zone, retired_at timestamp with time zone)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_station_list', 'denied', 'not_admin', null); return;\n  end if;\n  return query\n    select s.station_id, s.label, s.fingerprint, s.created_at, s.retired_at\n      from vault_enclave.sdm_stations s\n     order by s.retired_at nulls first, s.created_at desc\n     limit 50;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
       "name": "mark_sdm_batch_exported",
       "args": "p_batch_id uuid",
       "def": "CREATE OR REPLACE FUNCTION vault_enclave.mark_sdm_batch_exported(p_batch_id uuid)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_rows int;\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'not_admin', null); return false;\n  end if;\n  update vault_enclave.sdm_batches set exported_at = coalesce(exported_at, pg_catalog.clock_timestamp())\n   where batch_id = p_batch_id and retired_at is null;\n  get diagnostics v_rows = row_count;\n  perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', case when v_rows = 1 then 'granted' else 'denied' end,\n    case when v_rows = 1 then 'ok' else 'unknown_batch' end, null);\n  return v_rows = 1;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
+      "name": "mark_sdm_batch_exported",
+      "args": "p_batch_id uuid, p_station_id uuid",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.mark_sdm_batch_exported(p_batch_id uuid, p_station_id uuid)\n RETURNS TABLE(granted boolean, station_public_key bytea, batch_owner uuid, batch_payload bytea, fleet_owner uuid, fleet_payload bytea)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_batch vault_enclave.sdm_batches%rowtype;\n  v_fleet vault_enclave.sdm_fleet_keys%rowtype;\n  v_station vault_enclave.sdm_stations%rowtype;\n  v_batch_payload bytea;\n  v_fleet_payload bytea;\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'not_admin', null);\n    return query select false, null::bytea, null::uuid, null::bytea, null::uuid, null::bytea; return;\n  end if;\n  select * into v_station from vault_enclave.sdm_stations s where s.station_id = p_station_id for share;\n  if not found or v_station.retired_at is not null then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'unknown_station', null);\n    return query select false, null::bytea, null::uuid, null::bytea, null::uuid, null::bytea; return;\n  end if;\n  select * into v_batch from vault_enclave.sdm_batches b where b.batch_id = p_batch_id for update;\n  if not found or v_batch.retired_at is not null then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'unknown_batch', null);\n    return query select false, null::bytea, null::uuid, null::bytea, null::uuid, null::bytea; return;\n  end if;\n  select * into v_fleet from vault_enclave.sdm_fleet_keys f where f.fleet_id = v_batch.fleet_id;\n  select t.encrypted_payload into v_batch_payload from vault_enclave.opaque_tokens t\n   where t.token_ref = v_batch.sdm_ref and t.owner_user_id = v_batch.owner_user_id and t.token_type = 'sdm';\n  select t.encrypted_payload into v_fleet_payload from vault_enclave.opaque_tokens t\n   where t.token_ref = v_fleet.sdm_ref and t.owner_user_id = v_fleet.owner_user_id and t.token_type = 'sdm';\n  if v_fleet.fleet_id is null or v_fleet.retired_at is not null or v_batch_payload is null or v_fleet_payload is null then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'keys_unavailable', v_batch.sdm_ref);\n    return query select false, null::bytea, null::uuid, null::bytea, null::uuid, null::bytea; return;\n  end if;\n  update vault_enclave.sdm_batches set exported_at = coalesce(exported_at, pg_catalog.clock_timestamp())\n   where batch_id = v_batch.batch_id;\n  perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'granted',\n    'fp_' || pg_catalog.encode(v_station.fingerprint, 'hex'), v_batch.sdm_ref);\n  return query select true, v_station.public_key, v_batch.owner_user_id, v_batch_payload, v_fleet.owner_user_id, v_fleet_payload;\nend $function$"
     },
     {
       "schema": "vault_enclave",
@@ -30230,6 +30358,12 @@
     },
     {
       "schema": "vault_enclave",
+      "name": "register_sdm_station",
+      "args": "p_label text, p_public_key bytea",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.register_sdm_station(p_label text, p_public_key bytea)\n RETURNS uuid\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_label text := pg_catalog.btrim(coalesce(p_label, ''));\n  v_id uuid;\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_station_register', 'denied', 'not_admin', null); return null;\n  end if;\n  if char_length(v_label) not between 1 and 80 or p_public_key is null\n     or octet_length(p_public_key) <> 65 or pg_catalog.get_byte(p_public_key, 0) <> 4 then\n    perform vault_enclave.append_audit(v_caller, 'sdm_station_register', 'denied', 'bad_request', null); return null;\n  end if;\n  if exists (select 1 from vault_enclave.sdm_stations s where s.public_key = p_public_key) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_station_register', 'denied', 'duplicate_key', null); return null;\n  end if;\n  insert into vault_enclave.sdm_stations (label, public_key, fingerprint, registered_by)\n  values (v_label, p_public_key, pg_catalog.sha256(p_public_key), v_caller) returning station_id into v_id;\n  perform vault_enclave.append_audit(v_caller, 'sdm_station_register', 'granted',\n    'fp_' || pg_catalog.encode(pg_catalog.sha256(p_public_key), 'hex'), null);\n  return v_id;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
       "name": "register_server_key",
       "args": "p_kid bytea, p_public_key bytea, p_wrapped_seed bytea, p_kek_id bytea",
       "def": "CREATE OR REPLACE FUNCTION vault_enclave.register_server_key(p_kid bytea, p_public_key bytea, p_wrapped_seed bytea, p_kek_id bytea)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_rows int;\nbegin\n  if v_caller is null then\n    perform vault_enclave.append_audit(null, 'server_key_register', 'denied', 'no_caller', null); return false;\n  end if;\n  begin\n    insert into vault_enclave.server_keys (kid, public_key, wrapped_seed, kek_id)\n    values (p_kid, p_public_key, p_wrapped_seed, p_kek_id)\n    on conflict do nothing;\n    get diagnostics v_rows = row_count;\n  exception when check_violation or not_null_violation then\n    perform vault_enclave.append_audit(v_caller, 'server_key_register', 'denied', 'malformed', null); return false;\n  end;\n  if v_rows = 0 then\n    perform vault_enclave.append_audit(v_caller, 'server_key_register', 'denied', 'active_key_exists', null); return false;\n  end if;\n  perform vault_enclave.append_audit(v_caller, 'server_key_register', 'granted', 'ok', null);\n  return true;\nend $function$"
@@ -30239,6 +30373,12 @@
       "name": "register_step_up_proof",
       "args": "p_proof_id uuid, p_method text",
       "def": "CREATE OR REPLACE FUNCTION vault_enclave.register_step_up_proof(p_proof_id uuid, p_method text)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare v_caller uuid := vault_enclave.caller_user_id();\nbegin\n  if v_caller is null then\n    perform vault_enclave.append_audit(null, 'step_up_register', 'denied', 'no_caller', null); return false;\n  end if;\n  if p_method is distinct from 'passkey' then\n    perform vault_enclave.append_audit(v_caller, 'step_up_register', 'denied', 'method_not_passkey', null); return false;\n  end if;\n  if p_proof_id is null or exists (select 1 from vault_enclave.step_up_proofs s where s.proof_id = p_proof_id) then\n    perform vault_enclave.append_audit(v_caller, 'step_up_register', 'denied', 'proof_reused', null); return false;\n  end if;\n  -- Spent and stale proofs are useless after 300 s; keep the table small.\n  delete from vault_enclave.step_up_proofs s where s.verified_at < pg_catalog.clock_timestamp() - interval '1 hour';\n  insert into vault_enclave.step_up_proofs (proof_id, user_id, method, verified_at)\n  values (p_proof_id, v_caller, 'passkey', pg_catalog.clock_timestamp());\n  perform vault_enclave.append_audit(v_caller, 'step_up_register', 'granted', 'ok', null);\n  return true;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
+      "name": "retire_sdm_station",
+      "args": "p_station_id uuid",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.retire_sdm_station(p_station_id uuid)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_rows int;\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_station_retire', 'denied', 'not_admin', null); return false;\n  end if;\n  update vault_enclave.sdm_stations set retired_at = pg_catalog.clock_timestamp()\n   where station_id = p_station_id and retired_at is null;\n  get diagnostics v_rows = row_count;\n  perform vault_enclave.append_audit(v_caller, 'sdm_station_retire', case when v_rows = 1 then 'granted' else 'denied' end,\n    case when v_rows = 1 then 'ok' else 'unknown_station' end, null);\n  return v_rows = 1;\nend $function$"
     },
     {
       "schema": "vault_enclave",

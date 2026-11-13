@@ -57,6 +57,23 @@ export type SdmBatchSummary = {
   readonly activeCards: number;
 };
 
+export type SdmStation = {
+  readonly stationId: string;
+  readonly label: string;
+  readonly fingerprint: Uint8Array;
+  readonly createdAt: string;
+  readonly retiredAt: string | null;
+};
+
+/** What the vault hands out for one logged export: the station key and still-sealed envelopes. */
+export type SdmBatchExport = {
+  readonly stationPublicKey: Uint8Array;
+  readonly batchOwner: string;
+  readonly batchEnvelope: Uint8Array;
+  readonly fleetOwner: string;
+  readonly fleetEnvelope: Uint8Array;
+};
+
 export interface IVaultPort {
   /** Records a just-verified passkey step-up on the enclave's own clock. */
   registerPasskeyStepUp(caller: VaultCaller, proofId: string): Promise<void>;
@@ -92,8 +109,17 @@ export interface IVaultPort {
   activateMemberCard(caller: VaultCaller, grant: TapGrant, activationHash: Uint8Array | null): Promise<boolean>;
   /** Admin: batches with card counts, no key material. */
   listSdmBatches(caller: VaultCaller): Promise<SdmBatchSummary[]>;
-  /** Admin: records the one-time station configuration export. */
-  markSdmBatchExported(caller: VaultCaller, batchId: string): Promise<boolean>;
+  /** Admin: pins a personalisation station by its raw P-256 public key (db/0248). */
+  registerSdmStation(caller: VaultCaller, label: string, publicKey: Uint8Array): Promise<string>;
+  /** Admin: registered stations with fingerprints. */
+  listSdmStations(caller: VaultCaller): Promise<SdmStation[]>;
+  /** Admin: retires a station for good. */
+  retireSdmStation(caller: VaultCaller, stationId: string): Promise<boolean>;
+  /**
+   * Admin: mark_sdm_batch_exported(batch, station). Logs the export on the hash chain and,
+   * in the same transaction, returns the station key and the sealed envelopes; null on denial.
+   */
+  exportSdmBatch(caller: VaultCaller, batchId: string, stationId: string): Promise<SdmBatchExport | null>;
 }
 
 export class VaultDeniedError extends Error {
@@ -424,10 +450,63 @@ export class LocalPostgresVaultAdapter implements IVaultPort {
     }));
   }
 
-  async markSdmBatchExported(caller: VaultCaller, batchId: string): Promise<boolean> {
-    if (!UUID_RE.test(batchId)) throw new VaultDeniedError();
-    const rows = await this.exec(callerId(caller), "select vault_enclave.mark_sdm_batch_exported($1::uuid) as ok", [batchId]);
+  async registerSdmStation(caller: VaultCaller, label: string, publicKey: Uint8Array): Promise<string> {
+    if (publicKey.length !== 65 || publicKey[0] !== 0x04 || label.trim().length < 1 || label.trim().length > 80) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.register_sdm_station($1, decode($2, 'hex'))::text as id", [label.trim(), toHex(publicKey)]);
+    const id = rows[0]?.["id"];
+    if (typeof id !== "string" || !UUID_RE.test(id)) throw new VaultDeniedError();
+    return id;
+  }
+
+  async listSdmStations(caller: VaultCaller): Promise<SdmStation[]> {
+    const rows = await this.exec(
+      callerId(caller),
+      "select station_id::text as station_id, label, encode(fingerprint, 'hex') as fingerprint_hex, created_at::text as created_at, retired_at::text as retired_at from vault_enclave.list_sdm_stations()",
+      [],
+    );
+    const parsed = z
+      .array(
+        z.object({
+          station_id: z.string().regex(UUID_RE),
+          label: z.string().max(80),
+          fingerprint_hex: z.string().regex(/^[0-9a-f]{64}$/),
+          created_at: z.string(),
+          retired_at: z.string().nullable(),
+        }),
+      )
+      .max(50)
+      .safeParse(rows);
+    if (!parsed.success) throw new VaultDeniedError();
+    return parsed.data.map((r) => ({ stationId: r.station_id, label: r.label, fingerprint: fromHex(r.fingerprint_hex), createdAt: r.created_at, retiredAt: r.retired_at }));
+  }
+
+  async retireSdmStation(caller: VaultCaller, stationId: string): Promise<boolean> {
+    if (!UUID_RE.test(stationId)) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.retire_sdm_station($1::uuid) as ok", [stationId]);
     return rows[0]?.["ok"] === true;
+  }
+
+  async exportSdmBatch(caller: VaultCaller, batchId: string, stationId: string): Promise<SdmBatchExport | null> {
+    if (!UUID_RE.test(batchId) || !UUID_RE.test(stationId)) throw new VaultDeniedError();
+    const rows = await this.exec(
+      callerId(caller),
+      "select granted, encode(station_public_key, 'hex') as station_hex, batch_owner::text as batch_owner, encode(batch_payload, 'hex') as batch_hex, fleet_owner::text as fleet_owner, encode(fleet_payload, 'hex') as fleet_hex from vault_enclave.mark_sdm_batch_exported($1::uuid, $2::uuid)",
+      [batchId, stationId],
+    );
+    const row = z
+      .object({
+        granted: z.boolean(),
+        station_hex: z.string().regex(/^04[0-9a-f]{128}$/).nullable(),
+        batch_owner: z.string().regex(UUID_RE).nullable(),
+        batch_hex: z.string().regex(/^[0-9a-f]+$/).nullable(),
+        fleet_owner: z.string().regex(UUID_RE).nullable(),
+        fleet_hex: z.string().regex(/^[0-9a-f]+$/).nullable(),
+      })
+      .safeParse(rows[0]);
+    if (!row.success || !row.data.granted) return null;
+    const d = row.data;
+    if (!d.station_hex || !d.batch_owner || !d.batch_hex || !d.fleet_owner || !d.fleet_hex) return null;
+    return { stationPublicKey: fromHex(d.station_hex), batchOwner: d.batch_owner, batchEnvelope: fromHex(d.batch_hex), fleetOwner: d.fleet_owner, fleetEnvelope: fromHex(d.fleet_hex) };
   }
 }
 
