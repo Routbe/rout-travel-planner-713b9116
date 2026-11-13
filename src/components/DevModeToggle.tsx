@@ -23,8 +23,9 @@ export function DevModeToggle() {
     else void navigate({ to: mode === "admin" ? "/admin" : "/" } as never);
   };
 
+  // Studio has its own fixed bottom action bar below lg; the switch would cover it.
   return (
-    <div role="group" aria-label="Weergave wisselen" className="fixed bottom-4 right-4 z-[100] flex items-center gap-1 rounded-full border-2 border-primary bg-background p-1 text-sm font-medium shadow-xl">
+    <div role="group" aria-label="Weergave wisselen" className={cn("fixed bottom-4 right-4 z-[100] flex items-center gap-1 rounded-full border-2 border-primary bg-background p-1 text-sm font-medium shadow-xl", path.startsWith("/studio") && "hidden lg:flex")}>
       <span className="px-2 text-xs uppercase tracking-wide text-muted-foreground">Omgeving</span>
       {(["public", "admin"] as const).map((m) => (
         <button
