@@ -11,7 +11,9 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cardDivInput, diversifyAes128 } from "@/lib/crypto-enclave/sdm-verifier";
 import { deriveVaultKek } from "@/lib/vault/server-kek";
-import { activateMemberCard, createSdmBatch, createSdmFleetKey, exportStationConfig, importSdmManifest, listSdmBatches, publicCardProof, verifyCardTap } from "@/lib/vault/sdm-tap.server";
+import { activateMemberCard, createSdmBatch, createSdmFleetKey, exportStationBundle, importSdmManifest, listSdmStations, registerSdmStation, retireSdmStation, sdmExportAad, sdmExportInfo, listSdmBatches, publicCardProof, verifyCardTap } from "@/lib/vault/sdm-tap.server";
+import { p256 } from "@noble/curves/nist.js";
+import { hpkeOpen } from "@/lib/vault/hpke-p256";
 import { LocalPostgresVaultAdapter, VaultDeniedError, type VaultSqlExecutor } from "@/lib/vault/vault-port.server";
 
 const ADMIN = "00000000-0000-4000-8000-0000000000ad";
@@ -66,7 +68,7 @@ beforeAll(async () => {
   await db.exec(`create extension pgcrypto; create role rout_app; create table public.users (id uuid primary key);
     insert into public.users values ('${ADMIN}'), ('${MEMBER}');
     create function public.rout_is_admin_member(p_user uuid) returns boolean language sql stable as $$ select p_user = '${ADMIN}'::uuid $$;`);
-  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql", "0246_card_activation.sql", "0247_vault_hardening.sql"]) {
+  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql", "0246_card_activation.sql", "0247_vault_hardening.sql", "0248_sdm_stations.sql"]) {
     await db.exec(readFileSync(new URL(`../../db/${f}`, import.meta.url), "utf8"));
   }
   fleetId = await createSdmFleetKey(ADMIN, { ...deps, random: queue(META, UID_INDEX) });
@@ -224,16 +226,54 @@ describe("db/0246 card activation", () => {
     }
   });
 
-  it("lists batches and exports the station file only for admins, without key bytes", async () => {
+  it("lists batches only for admins", async () => {
     const all = await listSdmBatches(ADMIN, deps);
     expect(all.map((b) => b.label)).toContain("Test batch 1");
     expect(await listSdmBatches(MEMBER, deps)).toEqual([]);
-    await expect(exportStationConfig(MEMBER, batchId, "https://rout.be", deps)).rejects.toThrow(VaultDeniedError);
-    const cfg = await exportStationConfig(ADMIN, batchId, "https://rout.be", deps);
-    expect(cfg.ndef.urlTemplate).toBe(`https://rout.be/t?p=${"0".repeat(32)}&m=${"0".repeat(16)}`);
-    const text = JSON.stringify(cfg);
+  });
+
+  it("0248: pins stations by a valid P-256 key, admin only, no duplicates", async () => {
+    const sk = p256.utils.randomSecretKey();
+    const raw = hex(p256.getPublicKey(sk, false));
+    await expect(registerSdmStation(MEMBER, "Station X", raw, deps)).rejects.toThrow(VaultDeniedError);
+    await expect(registerSdmStation(ADMIN, "Station X", "04" + "11".repeat(64), deps)).rejects.toThrow(VaultDeniedError);
+    const st = await registerSdmStation(ADMIN, "Station X", raw, deps);
+    expect(st.fingerprint).toMatch(/^[0-9A-F]{64}$/);
+    await expect(registerSdmStation(ADMIN, "Again", raw, deps)).rejects.toThrow(VaultDeniedError);
+    expect((await listSdmStations(ADMIN, deps)).map((s) => s.fingerprint)).toContain(st.fingerprint);
+    expect(await listSdmStations(MEMBER, deps)).toEqual([]);
+    await expect(asApp(ADMIN, "select * from vault_enclave.sdm_stations", [])).rejects.toThrow(/permission denied/);
+  });
+
+  it("0248: exports the batch keys only HPKE-sealed to the chosen station, logged atomically", async () => {
+    const sk = p256.utils.randomSecretKey();
+    const st = await registerSdmStation(ADMIN, "Station Y", hex(p256.getPublicKey(sk, false)), deps);
+    await expect(exportStationBundle(MEMBER, batchId, st.stationId, "https://rout.be", deps)).rejects.toThrow(VaultDeniedError);
+    const before = (await db.query<{ n: number }>("select count(*)::int as n from vault_enclave.audit_logs where action = 'sdm_batch_export' and outcome = 'granted'")).rows[0]?.n ?? 0;
+    const bundle = await exportStationBundle(ADMIN, batchId, st.stationId, "https://rout.be", deps);
+    const text = JSON.stringify(bundle);
     for (const key of [META, UID_INDEX, MASTER]) expect(text).not.toContain(hex(key));
-    await expect(asApp(ADMIN, "select * from vault_enclave.sdm_batch_cards", [])).rejects.toThrow(/permission denied/);
+    expect(bundle.keys.station.fingerprint).toBe(st.fingerprint);
+    expect(bundle.ndef.urlTemplate).toBe(`https://rout.be/t?p=${"0".repeat(32)}&m=${"0".repeat(16)}`);
+    // The station, and only the station, opens it.
+    const info = sdmExportInfo(batchId, bytes(st.fingerprint));
+    expect(hex(info)).toBe(bundle.keys.infoHex);
+    const plain = hpkeOpen(sk, bytes(bundle.keys.encHex), info, sdmExportAad(), bytes(bundle.keys.ciphertextHex));
+    expect(hex(plain.slice(0, 4))).toBe("52534B31");
+    expect(hex(plain.slice(4, 20))).toBe(batchId.replace(/-/g, "").toUpperCase());
+    expect(plain.slice(20, 36)).toEqual(META);
+    expect(plain.slice(36, 52)).toEqual(MASTER);
+    expect(() => hpkeOpen(p256.utils.randomSecretKey(), bytes(bundle.keys.encHex), info, sdmExportAad(), bytes(bundle.keys.ciphertextHex))).toThrow();
+    // Same ciphertext under another batch id does not open.
+    expect(() => hpkeOpen(sk, bytes(bundle.keys.encHex), sdmExportInfo(fleetId, bytes(st.fingerprint)), sdmExportAad(), bytes(bundle.keys.ciphertextHex))).toThrow();
+    const logged = (await db.query<{ n: number; reason: string }>(
+      "select count(*)::int as n, max(reason) as reason from vault_enclave.audit_logs where action = 'sdm_batch_export' and outcome = 'granted'",
+    )).rows[0];
+    expect(logged?.n).toBe(before + 1);
+    expect(logged?.reason).toBe(`fp_${st.fingerprint.toLowerCase()}`);
+    // A retired station never receives keys again.
+    expect(await retireSdmStation(ADMIN, st.stationId, deps)).toBe(true);
+    await expect(exportStationBundle(ADMIN, batchId, st.stationId, "https://rout.be", deps)).rejects.toThrow(VaultDeniedError);
   });
 
   it("0247: compares activation hashes in constant time, all 32 bytes", async () => {
