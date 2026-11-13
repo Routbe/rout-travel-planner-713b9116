@@ -231,7 +231,8 @@ describe("db/0246 card activation", () => {
     await expect(exportStationConfig(MEMBER, batchId, "https://rout.be", deps)).rejects.toThrow(VaultDeniedError);
     const cfg = await exportStationConfig(ADMIN, batchId, "https://rout.be", deps);
     expect(cfg.ndef.urlTemplate).toBe(`https://rout.be/t?p=${"0".repeat(32)}&m=${"0".repeat(16)}`);
-    expect(JSON.stringify(cfg)).not.toMatch(/[0-9a-f]{32}(?!0)/i.test(JSON.stringify(cfg).replace(/0{16,}/g, "")) ? /never/ : /313131/);
+    const text = JSON.stringify(cfg);
+    for (const key of [META, UID_INDEX, MASTER]) expect(text).not.toContain(hex(key));
     await expect(asApp(ADMIN, "select * from vault_enclave.sdm_batch_cards", [])).rejects.toThrow(/permission denied/);
   });
 });
