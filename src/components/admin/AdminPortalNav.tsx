@@ -1,7 +1,7 @@
 import { createContext, useContext } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
-  AtSign, Award, BadgeCheck, Building2, CreditCard, Gift, Globe, Inbox, KeyRound, LayoutDashboard, Landmark, Lock, Mail, Plug, Power,
+  AtSign, Award, BadgeCheck, Building2, CreditCard, Gift, Globe, Inbox, KeyRound, LayoutDashboard, Landmark, Lock, Mail, Nfc, Plug, Power,
   Rocket, ScrollText, Shield, Sparkles, Tag, UserCog, UserSearch, Users, Webhook, Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,7 +15,7 @@ type AdminPath =
   | "/admin" | "/admin/verifications" | "/admin/console" | "/admin/sepa" | "/admin/ops" | "/admin/oauth-apps"
   | "/admin/members" | "/admin/handles" | "/admin/brands" | "/admin/subdomains" | "/admin/workspaces"
   | "/admin/features" | "/admin/integrations" | "/admin/webhooks" | "/admin/custom-badges" | "/admin/finance"
-  | "/admin/gift-cards" | "/admin/contact" | "/admin/infra" | "/admin/team" | "/admin/recovery";
+  | "/admin/gift-cards" | "/admin/cards" | "/admin/contact" | "/admin/infra" | "/admin/team" | "/admin/recovery";
 type NavItem = { to: AdminPath; label: string; icon: typeof Shield; tab?: AdminConsoleTab };
 
 /**
@@ -68,6 +68,7 @@ export const ADMIN_NAV_GROUPS: ReadonlyArray<{ label: string; items: ReadonlyArr
       { to: "/admin/console", tab: "pricing", label: "Prijzen", icon: Tag },
       { to: "/admin/console", tab: "promos", label: "Promocodes", icon: Tag },
       { to: "/admin/gift-cards", label: "Cadeaubonnen", icon: Gift },
+      { to: "/admin/cards", label: "ROUT Card-batches", icon: Nfc },
     ],
   },
   {
