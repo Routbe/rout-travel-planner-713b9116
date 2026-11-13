@@ -30,7 +30,12 @@ export const Route = createFileRoute("/t")({
   component: CardTap,
 });
 
-type View = { kind: "checking" } | { kind: "missing" } | CardTapResult;
+type View =
+  | { kind: "checking" }
+  | { kind: "missing" }
+  | { kind: "activate" | "activating"; p: string; m: string }
+  | { activation: CardActivationResult["status"] }
+  | CardTapResult;
 
 function CardTap() {
   const verify = useServerFn(verifyCardTapFn);
