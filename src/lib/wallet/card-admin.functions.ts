@@ -37,11 +37,18 @@ export const exportCardBatchFn = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { assertAdminRole } = await import("@/lib/admin.server");
     await assertAdminRole(context.userId);
-    const { setResponseHeader } = await import("@tanstack/react-start/server");
+    const { getRequest, setResponseHeader } = await import("@tanstack/react-start/server");
     setResponseHeader("cache-control", "no-store");
     const { exportStationConfig } = await import("@/lib/vault/sdm-tap.server");
-    const { appOrigin } = await import("@/lib/short-links");
-    return exportStationConfig(context.userId, data.batchId, appOrigin());
+    // The tap URL is the canonical public origin; the request origin only as a fallback.
+    const configured = process.env["PUBLIC_ORIGIN"];
+    let origin = new URL(getRequest().url).origin;
+    try {
+      if (configured) origin = new URL(configured).origin;
+    } catch {
+      /* malformed PUBLIC_ORIGIN: keep the request origin */
+    }
+    return exportStationConfig(context.userId, data.batchId, origin);
   });
 
 const ManifestSchema = z
