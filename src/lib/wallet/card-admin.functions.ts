@@ -40,7 +40,7 @@ export const exportCardBatchFn = createServerFn({ method: "POST" })
     const { setResponseHeader } = await import("@tanstack/react-start/server");
     setResponseHeader("cache-control", "no-store");
     const { exportStationConfig } = await import("@/lib/vault/sdm-tap.server");
-    const { appOrigin } = await import("@/lib/card-origin");
+    const { appOrigin } = await import("@/lib/short-links");
     return exportStationConfig(context.userId, data.batchId, appOrigin());
   });
 
