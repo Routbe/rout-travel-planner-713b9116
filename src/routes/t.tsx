@@ -3,6 +3,10 @@ import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useRef, useState } from "react";
 import { Loader2, ShieldCheck, ShieldX } from "lucide-react";
 import { verifyCardTapFn, type CardTapResult } from "@/lib/wallet/card-tap.functions";
+import { activateCardFn, type CardActivationResult } from "@/lib/wallet/card-admin.functions";
+import { takeActivationIntent } from "@/lib/wallet/card-activation-intent";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 /**
  * ROUT Card tap: the chip opens /t?p=<PICCData>&m=<CMAC>. The parameters are
