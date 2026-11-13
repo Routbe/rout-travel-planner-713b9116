@@ -37,8 +37,11 @@ describe("NTAG 424 DNA station configuration", () => {
   });
 
   it("carries no key material and refuses a non-https origin", () => {
-    const text = JSON.stringify(stationConfig(BATCH));
-    expect(text).not.toMatch(/[0-9A-F]{32}(?!0)/.source.length ? /"(key|secret|master)Hex"/ : /x/);
+    const cfg = stationConfig(BATCH);
+    const hexFields = JSON.stringify(cfg).match(/"\w*Hex"/g);
+    expect(hexFields).toEqual(['"fileHex"', '"payloadHex"']);
+    // The only long hex run in the file is the NDEF file itself, i.e. the public URL.
+    expect(new TextDecoder().decode(Uint8Array.from(cfg.ndef.fileHex.match(/../g)!.map((h) => parseInt(h, 16))).slice(7))).toBe(cfg.ndef.urlTemplate.slice(8));
     expect(() => sdmNdefFile("http://rout.be")).toThrow();
   });
 });
