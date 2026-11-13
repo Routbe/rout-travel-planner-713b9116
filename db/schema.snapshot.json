@@ -26762,7 +26762,7 @@
         {
           "name": "audit_logs_action_check",
           "kind": "c",
-          "def": "CHECK ((action = ANY (ARRAY['step_up_register'::text, 'token_store'::text, 'token_retrieve'::text, 'server_key_register'::text, 'sdm_card_register'::text, 'sdm_recovery_retrieve'::text, 'sdm_recovery_confirm'::text, 'sdm_fleet_register'::text, 'sdm_batch_register'::text, 'sdm_batch_cards_register'::text, 'sdm_tap_begin'::text, 'sdm_tap_confirm'::text, 'sdm_tap_consume'::text])))"
+          "def": "CHECK ((action = ANY (ARRAY['step_up_register'::text, 'token_store'::text, 'token_retrieve'::text, 'server_key_register'::text, 'sdm_card_register'::text, 'sdm_recovery_retrieve'::text, 'sdm_recovery_confirm'::text, 'sdm_fleet_register'::text, 'sdm_batch_register'::text, 'sdm_batch_cards_register'::text, 'sdm_tap_begin'::text, 'sdm_tap_confirm'::text, 'sdm_tap_consume'::text, 'sdm_card_activate'::text, 'sdm_batch_list'::text, 'sdm_batch_export'::text])))"
         },
         {
           "name": "audit_logs_entry_hash_key",
@@ -26974,6 +26974,14 @@
           "default": null,
           "identity": null,
           "generated": null
+        },
+        {
+          "name": "initial_counter",
+          "type": "integer",
+          "notNull": false,
+          "default": null,
+          "identity": null,
+          "generated": null
         }
       ],
       "constraints": [
@@ -26991,6 +26999,11 @@
           "name": "sdm_batch_cards_counter_range",
           "kind": "c",
           "def": "CHECK (((last_counter IS NULL) OR ((last_counter >= 0) AND (last_counter <= 16777214))))"
+        },
+        {
+          "name": "sdm_batch_cards_initial_counter_range",
+          "kind": "c",
+          "def": "CHECK (((initial_counter IS NULL) OR ((initial_counter >= 0) AND (initial_counter <= 16777214))))"
         },
         {
           "name": "sdm_batch_cards_owner_user_id_fkey",
@@ -27574,7 +27587,7 @@
         {
           "name": "sdm_tap_grants_purpose",
           "kind": "c",
-          "def": "CHECK (((consumed_for IS NULL) OR (consumed_for = ANY (ARRAY['public_proof'::text, 'step_up'::text]))))"
+          "def": "CHECK (((consumed_for IS NULL) OR (consumed_for = ANY (ARRAY['public_proof'::text, 'step_up'::text, 'activation'::text]))))"
         }
       ],
       "indexes": [
@@ -30000,6 +30013,12 @@
     },
     {
       "schema": "vault_enclave",
+      "name": "activate_member_card",
+      "args": "p_tap_ref text, p_activation_hash bytea",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.activate_member_card(p_tap_ref text, p_activation_hash bytea)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_now timestamptz := pg_catalog.clock_timestamp();\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_grant vault_enclave.sdm_tap_grants%rowtype;\n  v_card vault_enclave.sdm_batch_cards%rowtype;\nbegin\n  if v_caller is null then\n    perform vault_enclave.append_audit(null, 'sdm_card_activate', 'denied', 'no_caller', null); return false;\n  end if;\n  if p_tap_ref is null or p_tap_ref !~ '^tap_[0-9a-f]{64}$'\n     or (p_activation_hash is not null and octet_length(p_activation_hash) <> 32) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'denied', 'bad_request', null); return false;\n  end if;\n  select * into v_grant from vault_enclave.sdm_tap_grants g\n   where g.grant_digest = pg_catalog.sha256(pg_catalog.convert_to(p_tap_ref, 'UTF8')) for update;\n  if not found or v_grant.consumed_at is not null or v_grant.expires_at < v_now then\n    perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'denied',\n      case when not found then 'unknown_grant' when v_grant.consumed_at is not null then 'grant_spent' else 'grant_expired' end, null);\n    return false;\n  end if;\n  -- The grant is spent whatever happens next: one tap, one answer.\n  update vault_enclave.sdm_tap_grants set consumed_at = v_now, consumed_for = 'activation' where grant_digest = v_grant.grant_digest;\n  select * into v_card from vault_enclave.sdm_batch_cards c where c.card_id = v_grant.card_id for update;\n  if v_card.revoked_at is not null then\n    perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'denied', 'card_revoked', null); return false;\n  end if;\n  if v_card.owner_user_id is not null or v_card.activated_at is not null then\n    perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'denied', 'card_claimed', null); return false;\n  end if;\n  if v_card.activation_hash is not null and (p_activation_hash is null or p_activation_hash <> v_card.activation_hash) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'denied', 'activation_code_mismatch', null); return false;\n  end if;\n  update vault_enclave.sdm_batch_cards\n     set owner_user_id = v_caller, activated_at = v_now, initial_counter = last_counter\n   where card_id = v_card.card_id;\n  perform vault_enclave.append_audit(v_caller, 'sdm_card_activate', 'granted', 'ok', null);\n  return true;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
       "name": "append_audit",
       "args": "p_actor uuid, p_action text, p_outcome text, p_reason text, p_ref text",
       "def": "CREATE OR REPLACE FUNCTION vault_enclave.append_audit(p_actor uuid, p_action text, p_outcome text, p_reason text, p_ref text)\n RETURNS void\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_prev bytea;\n  v_at timestamptz := pg_catalog.clock_timestamp();\nbegin\n  -- One writer at a time keeps the chain linear (prev_hash is unique: no forks).\n  perform pg_catalog.pg_advisory_xact_lock(7421003221);\n  select a.entry_hash into v_prev from vault_enclave.audit_logs a order by a.seq desc limit 1;\n  v_prev := coalesce(v_prev, pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'));\n  insert into vault_enclave.audit_logs (occurred_at, actor_user_id, action, outcome, reason, token_ref, prev_hash, entry_hash)\n  values (v_at, p_actor, p_action, p_outcome, p_reason, p_ref, v_prev,\n          vault_enclave.audit_entry_hash(v_prev, v_at, p_actor, p_action, p_outcome, p_reason, p_ref));\nend $function$"
@@ -30045,6 +30064,18 @@
       "name": "consume_sdm_tap",
       "args": "p_tap_ref text, p_purpose text",
       "def": "CREATE OR REPLACE FUNCTION vault_enclave.consume_sdm_tap(p_tap_ref text, p_purpose text)\n RETURNS TABLE(granted boolean, card_state text)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_now timestamptz := pg_catalog.clock_timestamp();\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_grant vault_enclave.sdm_tap_grants%rowtype;\n  v_card vault_enclave.sdm_batch_cards%rowtype;\nbegin\n  if p_tap_ref is null or p_tap_ref !~ '^tap_[0-9a-f]{64}$' or p_purpose not in ('public_proof', 'step_up') then\n    perform vault_enclave.append_audit(v_caller, 'sdm_tap_consume', 'denied', 'bad_request', null);\n    return query select false, null::text; return;\n  end if;\n  select * into v_grant from vault_enclave.sdm_tap_grants g\n   where g.grant_digest = pg_catalog.sha256(pg_catalog.convert_to(p_tap_ref, 'UTF8')) for update;\n  if not found or v_grant.consumed_at is not null or v_grant.expires_at < v_now then\n    perform vault_enclave.append_audit(v_caller, 'sdm_tap_consume', 'denied',\n      case when not found then 'unknown_grant' when v_grant.consumed_at is not null then 'grant_spent' else 'grant_expired' end, null);\n    return query select false, null::text; return;\n  end if;\n  select * into v_card from vault_enclave.sdm_batch_cards c where c.card_id = v_grant.card_id;\n  if v_card.revoked_at is not null or (p_purpose = 'step_up' and (v_caller is null or v_card.owner_user_id is distinct from v_caller)) then\n    update vault_enclave.sdm_tap_grants set consumed_at = v_now, consumed_for = p_purpose where grant_digest = v_grant.grant_digest;\n    perform vault_enclave.append_audit(v_caller, 'sdm_tap_consume', 'denied',\n      case when v_card.revoked_at is not null then 'card_revoked' else 'not_card_owner' end, null);\n    return query select false, null::text; return;\n  end if;\n  update vault_enclave.sdm_tap_grants set consumed_at = v_now, consumed_for = p_purpose where grant_digest = v_grant.grant_digest;\n  perform vault_enclave.append_audit(v_caller, 'sdm_tap_consume', 'granted', p_purpose, null);\n  return query select true, case when v_card.owner_user_id is null then 'unactivated' else 'active' end;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
+      "name": "list_sdm_batches",
+      "args": "",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.list_sdm_batches()\n RETURNS TABLE(batch_id uuid, fleet_id uuid, label text, created_at timestamp with time zone, exported_at timestamp with time zone, retired_at timestamp with time zone, cards integer, active_cards integer)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_list', 'denied', 'not_admin', null); return;\n  end if;\n  return query\n    select b.batch_id, b.fleet_id, b.label, b.created_at, b.exported_at, b.retired_at,\n           (select count(*)::int from vault_enclave.sdm_batch_cards c where c.batch_id = b.batch_id),\n           (select count(*)::int from vault_enclave.sdm_batch_cards c where c.batch_id = b.batch_id and c.owner_user_id is not null and c.revoked_at is null)\n      from vault_enclave.sdm_batches b\n     order by b.created_at desc\n     limit 200;\nend $function$"
+    },
+    {
+      "schema": "vault_enclave",
+      "name": "mark_sdm_batch_exported",
+      "args": "p_batch_id uuid",
+      "def": "CREATE OR REPLACE FUNCTION vault_enclave.mark_sdm_batch_exported(p_batch_id uuid)\n RETURNS boolean\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog'\nAS $function$\ndeclare\n  v_caller uuid := vault_enclave.caller_user_id();\n  v_rows int;\nbegin\n  if v_caller is null or not public.rout_is_admin_member(v_caller) then\n    perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', 'denied', 'not_admin', null); return false;\n  end if;\n  update vault_enclave.sdm_batches set exported_at = coalesce(exported_at, pg_catalog.clock_timestamp())\n   where batch_id = p_batch_id and retired_at is null;\n  get diagnostics v_rows = row_count;\n  perform vault_enclave.append_audit(v_caller, 'sdm_batch_export', case when v_rows = 1 then 'granted' else 'denied' end,\n    case when v_rows = 1 then 'ok' else 'unknown_batch' end, null);\n  return v_rows = 1;\nend $function$"
     },
     {
       "schema": "vault_enclave",
