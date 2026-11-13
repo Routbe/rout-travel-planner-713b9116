@@ -8,7 +8,7 @@
 - [x] schema level 0245, snapshot + db types
 ## ROUT Card tap — later batches
 - [ ] step_up purpose (card_tap method for card_reveal / card_lifecycle)
-- [x] Admin batch screen (/admin/cards): create, station config export, manifest import; member activation (db/0246, written, not yet applied to Neon)
+- [x] Admin batch screen (/admin/cards): create, station config export, manifest import; member activation (db/0246, live on Neon)
 
 ## Workspace Studio
 - [ ] New profile photo does not save in Workspace Studio (e.g. maximilien-6yak, private account switched to workspace)
