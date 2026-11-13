@@ -34,6 +34,8 @@ type View = { kind: "checking" } | { kind: "missing" } | CardTapResult;
 
 function CardTap() {
   const verify = useServerFn(verifyCardTapFn);
+  const activate = useServerFn(activateCardFn);
+  const [code, setCode] = useState("");
   const [view, setView] = useState<View>({ kind: "checking" });
   const started = useRef(false);
 
@@ -49,10 +51,71 @@ function CardTap() {
       setView({ kind: "missing" });
       return;
     }
+    // Started from "Activeer je ROUT Card": this tap links the card instead.
+    // The single-use tap bytes stay in memory only until the member confirms.
+    if (takeActivationIntent()) {
+      setView({ kind: "activate", p, m });
+      return;
+    }
     verify({ data: { p, m } })
       .then((r) => setView(r))
       .catch(() => setView({ status: "denied" }));
   }, [verify]);
+
+  if ("kind" in view && (view.kind === "activate" || view.kind === "activating")) {
+    const busy = view.kind === "activating";
+    const tapBytes = { p: view.p, m: view.m };
+    return (
+      <main className="mx-auto flex min-h-[80vh] max-w-md flex-col items-center justify-center gap-6 p-6 text-center">
+        <form
+          className="flex w-full flex-col items-center gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (busy) return;
+            setView({ kind: "activating", ...tapBytes });
+            activate({ data: { ...tapBytes, code: code.trim() || null } })
+              .then((r: CardActivationResult) => setView({ activation: r.status }))
+              .catch(() => setView({ activation: "denied" }));
+          }}
+        >
+          <ShieldCheck className="h-14 w-14 text-primary" strokeWidth={1.5} aria-hidden />
+          <h1 className="text-2xl font-semibold">Activeer je ROUT Card</h1>
+          <p className="text-sm text-muted-foreground">Deze kaart wordt aan je ingelogde account gekoppeld. Staat er een activatiecode bij je kaart, vul ze dan in.</p>
+          <label className="w-full text-left text-sm">
+            <span className="mb-1 block text-muted-foreground">Activatiecode (optioneel)</span>
+            <Input value={code} onChange={(e) => setCode(e.target.value)} maxLength={32} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
+          </label>
+          <Button type="submit" className="w-full" disabled={busy}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : "Kaart koppelen"}
+          </Button>
+        </form>
+      </main>
+    );
+  }
+  if ("activation" in view) {
+    return (
+      <main className="mx-auto flex min-h-[80vh] max-w-md flex-col items-center justify-center gap-4 p-6 text-center">
+        {view.activation === "activated" ? (
+          <>
+            <ShieldCheck className="h-14 w-14 text-primary" strokeWidth={1.5} aria-hidden />
+            <h1 className="text-2xl font-semibold">Je ROUT Card is actief</h1>
+            <p className="text-sm text-muted-foreground">De kaart is nu aan je account gekoppeld.</p>
+          </>
+        ) : (
+          <>
+            <ShieldX className="h-14 w-14 text-destructive" strokeWidth={1.5} aria-hidden />
+            <h1 className="text-2xl font-semibold">{view.activation === "limited" ? "Even wachten" : "Niet gekoppeld"}</h1>
+            <p className="text-sm text-muted-foreground">
+              {view.activation === "limited"
+                ? "Te veel pogingen kort na elkaar. Probeer het later opnieuw."
+                : "Deze kaart kon niet gekoppeld worden. Ben je ingelogd, is de kaart nog niet gekoppeld en klopt de code? Start opnieuw via je account en tik de kaart opnieuw."}
+            </p>
+          </>
+        )}
+        <Link to="/studio/account" className="text-xs text-muted-foreground hover:text-foreground">Naar je account</Link>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto flex min-h-[80vh] max-w-md flex-col items-center justify-center gap-6 p-6 text-center">
