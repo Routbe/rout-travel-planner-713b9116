@@ -17,3 +17,4 @@
 - [x] 0247 hardening (live on Neon, verified): constant-time activation-hash compare, SERIALIZABLE + retry for consume/activate, deny-all RLS on vault_enclave (review before apply)
 - [x] Station file v2: correct NDEF offsets, encrypted UID+counter, ChangeFileSettings payload
 - [ ] Key delivery to the personalisation station: per-batch keys sealed to the station HSM public key, one-time + audited (blocked: station HSM key type)
+- [ ] Station registry (0248) + HPKE-wrapped batch key export on /admin/cards, logged via mark_sdm_batch_exported
