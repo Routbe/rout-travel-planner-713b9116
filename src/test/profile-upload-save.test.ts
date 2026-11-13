@@ -44,3 +44,11 @@ describe("upload URL accepted by both profile save paths", () => {
     });
   }
 });
+describe("workspace logo upload URL", () => {
+  it("is accepted by the Studio photo save", async () => {
+    const { profileMetaPatchSchema } = await import("@/lib/profile-draft-patch");
+    const url = "/api/public/avatar?path=12345678-1234-1234-1234-123456789abc%2Fworkspace-logo-1731481234.webp";
+    const r = profileMetaPatchSchema.safeParse({ space: "workspace", workspaceId: "12345678-1234-1234-1234-123456789abc", avatarUrl: url });
+    expect(r.success).toBe(true);
+  });
+});
