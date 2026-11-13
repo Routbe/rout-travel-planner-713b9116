@@ -66,7 +66,7 @@ beforeAll(async () => {
   await db.exec(`create extension pgcrypto; create role rout_app; create table public.users (id uuid primary key);
     insert into public.users values ('${ADMIN}'), ('${MEMBER}');
     create function public.rout_is_admin_member(p_user uuid) returns boolean language sql stable as $$ select p_user = '${ADMIN}'::uuid $$;`);
-  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql", "0246_card_activation.sql"]) {
+  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql", "0246_card_activation.sql", "0247_vault_hardening.sql"]) {
     await db.exec(readFileSync(new URL(`../../db/${f}`, import.meta.url), "utf8"));
   }
   fleetId = await createSdmFleetKey(ADMIN, { ...deps, random: queue(META, UID_INDEX) });
