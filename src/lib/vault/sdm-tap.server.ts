@@ -24,7 +24,7 @@ import { cardDivInput, decryptPiccData, diversifyAes128, uidIndex, verifySdmTap 
 import type { VaultKek } from "./server-kek";
 import { openWithServerKey, sealServerToken } from "./server-vault.server";
 import type { TapGrant } from "./token-boundary";
-import { VaultDeniedError, vaultPort, type IVaultPort, type SdmCardState, type SdmTapBytes, type SdmTapChallenge } from "./vault-port.server";
+import { VaultDeniedError, vaultPort, type IVaultPort, type SdmBatchSummary, type SdmCardState, type SdmTapBytes, type SdmTapChallenge } from "./vault-port.server";
 
 export const SDM_FLEET_PURPOSE = "card_fleet";
 export const SDM_BATCH_PURPOSE = "card_batch";
@@ -67,6 +67,12 @@ function fleetSecrets(plain: Uint8Array) {
 function batchMaster(plain: Uint8Array): Uint8Array {
   if (plain.length !== BATCH_BYTES || BATCH_MAGIC.some((m, i) => plain[i] !== m)) throw new VaultDeniedError();
   return plain.subarray(4, 20);
+}
+
+/** The stored form of a printed activation code (same as the manifest import). */
+export async function activationCodeHash(code: string): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(`rout-card-activation:v1:${code.trim().toUpperCase()}`)));
 }
 
 // ---------------------------------------------------------------- admin side
@@ -116,10 +122,7 @@ export async function importSdmManifest(
   const fleet = (await port.sdmFleetKeys()).find((f) => f.fleetId === fleetId);
   if (!fleet || cards.length < 1 || cards.length > 5000) throw new VaultDeniedError();
   if (cards.some((c) => !/^[0-9A-Fa-f]{14}$/.test(c.uid))) throw new VaultDeniedError();
-  const enc = new TextEncoder();
-  const activation = await Promise.all(
-    cards.map(async (c) => (c.activationCode ? new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(`rout-card-activation:v1:${c.activationCode.trim().toUpperCase()}`))) : null)),
-  );
+  const activation = await Promise.all(cards.map((c) => (c.activationCode ? activationCodeHash(c.activationCode) : null)));
   const hashes = await openFleet(fleet, deps, (s) =>
     cards.map((c) => {
       const uid = hexBytes(c.uid);
@@ -210,4 +213,69 @@ export async function publicCardProof(input: unknown, deps: Deps = {}): Promise<
   const state = await port.consumeSdmTap(null, grant, "public_proof");
   if (!state) throw new VaultDeniedError();
   return state;
+}
+
+// ---------------------------------------------------------------- activation (db/0246)
+
+/**
+ * First physical tap of a new card by its signed-in member: the tap is verified
+ * exactly like a public proof, then its grant is spent for "activation", which
+ * links the unclaimed card to `userId`. Every denial is the same VaultDeniedError.
+ */
+export async function activateMemberCard(userId: string, input: unknown, activationCode: string | null, deps: Deps = {}): Promise<void> {
+  const port = deps.port ?? vaultPort();
+  const grant = await verifyCardTap(input, { ...deps, port });
+  const code = activationCode?.trim() ? activationCode : null;
+  if (code !== null && !/^[0-9A-Za-z-]{4,32}$/.test(code.trim())) throw new VaultDeniedError();
+  const hash = code ? await activationCodeHash(code) : null;
+  try {
+    if (!(await port.activateMemberCard({ userId }, grant, hash))) throw new VaultDeniedError();
+  } finally {
+    hash?.fill(0);
+  }
+}
+
+/** Admin: batch overview (counts only). */
+export function listSdmBatches(adminId: string, deps: Deps = {}): Promise<SdmBatchSummary[]> {
+  return (deps.port ?? vaultPort()).listSdmBatches({ userId: adminId });
+}
+
+/**
+ * NTAG 424 DNA personalisation settings for the writing station (AN12196 SUN):
+ * the NDEF URL template with mirror offsets and the key slots. It carries no
+ * key bytes: keys are injected by the station's own secure key loading, so a
+ * leaked file grants nothing.
+ */
+export function stationConfig(batchId: string, origin = "https://rout.be") {
+  const base = `${origin.replace(/\/$/, "")}/t?p=`;
+  const piccPlaceholder = "0".repeat(32);
+  const url = `${base}${piccPlaceholder}&m=${"0".repeat(16)}`;
+  // NDEF file 2 layout: NLEN (2) + record header (5) + URI prefix code (1), then the URL without "https://".
+  const ndefHeader = 2 + 5;
+  const urlBody = url.replace(/^https:\/\//, "");
+  const piccOffset = ndefHeader + 1 + urlBody.indexOf("p=") + 2;
+  const macOffset = ndefHeader + 1 + urlBody.indexOf("m=") + 2;
+  return {
+    format: "rout-sdm-station/v1",
+    batchId,
+    chip: "NTAG 424 DNA",
+    ndef: { fileNo: 2, uriPrefix: "https://", urlTemplate: url },
+    sdm: {
+      enabled: true,
+      asciiEncoding: true,
+      uidMirror: false,
+      readCounterMirror: false,
+      encryptedPiccData: { offset: piccOffset, length: 32, keyNo: 1, key: "K_SDMMetaRead (fleet)" },
+      sdmMac: { offset: macOffset, macInputOffset: macOffset, length: 16, keyNo: 2, key: "K_SDMFileRead = AN10922(batch master, UID || batch id)" },
+      readCounterLimit: null,
+    },
+    access: { read: "free", write: "key 0", readWrite: "key 0", change: "key 0", keyNo0: "card master (station)" },
+  } as const;
+}
+
+/** Admin: records the export and returns the station configuration. */
+export async function exportStationConfig(adminId: string, batchId: string, origin?: string, deps: Deps = {}) {
+  const port = deps.port ?? vaultPort();
+  if (!(await port.markSdmBatchExported({ userId: adminId }, batchId))) throw new VaultDeniedError();
+  return stationConfig(batchId, origin);
 }

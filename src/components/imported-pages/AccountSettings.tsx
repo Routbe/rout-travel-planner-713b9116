@@ -33,6 +33,7 @@ import { ConvertToWorkspaceWizard } from "@/components/settings/ConvertToWorkspa
 import { BunqConnectionPanel } from "@/components/dashboard/BunqConnectionPanel";
 import { BillingHistoryPanel } from "@/components/dashboard/BillingHistoryPanel";
 import { DataExportCard } from "@/components/dashboard/DataExportCard";
+import { CardActivationCard } from "@/components/wallet/CardActivationCard";
 import { DeleteAccountPanel } from "@/components/settings/DeleteAccountPanel";
 import { DomainClaimPanel } from "@/components/settings/DomainClaimPanel";
 import { IdentityLinksPanel } from "@/components/settings/IdentityLinksPanel";
@@ -365,6 +366,8 @@ export default function AccountSettings() {
         {/* Data & domein */}
         <TabsContent value="data" className="space-y-4">
           <DocHelpLink to="/support/account/data-domains" />
+          <CardActivationCard />
+
           <section className="space-y-5 rounded-2xl border border-border bg-card p-4 sm:p-5">
             <h2 className="text-lg font-medium">Data &amp; domein</h2>
             <DataExportCard />

@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cardDivInput, diversifyAes128 } from "@/lib/crypto-enclave/sdm-verifier";
 import { deriveVaultKek } from "@/lib/vault/server-kek";
-import { createSdmBatch, createSdmFleetKey, importSdmManifest, publicCardProof, verifyCardTap } from "@/lib/vault/sdm-tap.server";
+import { activateMemberCard, createSdmBatch, createSdmFleetKey, exportStationConfig, importSdmManifest, listSdmBatches, publicCardProof, verifyCardTap } from "@/lib/vault/sdm-tap.server";
 import { LocalPostgresVaultAdapter, VaultDeniedError, type VaultSqlExecutor } from "@/lib/vault/vault-port.server";
 
 const ADMIN = "00000000-0000-4000-8000-0000000000ad";
@@ -66,7 +66,7 @@ beforeAll(async () => {
   await db.exec(`create extension pgcrypto; create role rout_app; create table public.users (id uuid primary key);
     insert into public.users values ('${ADMIN}'), ('${MEMBER}');
     create function public.rout_is_admin_member(p_user uuid) returns boolean language sql stable as $$ select p_user = '${ADMIN}'::uuid $$;`);
-  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql"]) {
+  for (const f of ["0221_vault_enclave_isolation.sql", "0222_vault_server_keys.sql", "0224_sdm_recovery_gate.sql", "0245_sdm_tap.sql", "0246_card_activation.sql"]) {
     await db.exec(readFileSync(new URL(`../../db/${f}`, import.meta.url), "utf8"));
   }
   fleetId = await createSdmFleetKey(ADMIN, { ...deps, random: queue(META, UID_INDEX) });
@@ -174,5 +174,65 @@ describe("db/0245 permissions", () => {
     );
     expect(r.rows[0]?.n).toBeGreaterThan(20);
     expect(r.rows[0]?.ok).toBe(true);
+  });
+});
+
+describe("db/0246 card activation", () => {
+  const OTHER = "00000000-0000-4000-8000-0000000000e2";
+  let codeBatch = "";
+  beforeAll(async () => {
+    await db.query("insert into public.users values ($1)", [OTHER]);
+    await db.exec("update vault_enclave.sdm_batch_cards set owner_user_id = null, activated_at = null");
+  });
+
+  it("links an unclaimed card to the signed-in member with its first counter, and only once", async () => {
+    await activateMemberCard(MEMBER, tap("04A1B2C3D4E5F6", 100), null, deps);
+    const row = await db.query<{ owner: string; initial_counter: number; activated: boolean }>(
+      "select owner_user_id::text as owner, initial_counter, activated_at is not null as activated from vault_enclave.sdm_batch_cards c join vault_enclave.sdm_tap_grants g using (card_id) where g.consumed_for = 'activation' limit 1",
+    );
+    expect(row.rows[0]).toEqual({ owner: MEMBER, initial_counter: 100, activated: true });
+    await expect(activateMemberCard(OTHER, tap("04A1B2C3D4E5F6", 101), null, deps)).rejects.toThrow(VaultDeniedError);
+    await expect(activateMemberCard(MEMBER, tap("04A1B2C3D4E5F6", 102), null, deps)).rejects.toThrow(VaultDeniedError);
+    expect(await publicCardProof(tap("04A1B2C3D4E5F6", 103), deps)).toBe("active");
+    const audit = await db.query<{ reason: string }>("select reason from vault_enclave.audit_logs where action = 'sdm_card_activate' order by seq desc limit 1");
+    expect(audit.rows[0]?.reason).toBe("card_claimed");
+  });
+
+  it("refuses a reused tap, a forged tap and a caller without session", async () => {
+    const t = tap("04A1B2C3D4E5F7", 200);
+    await expect(activateMemberCard(MEMBER, forged(t), null, deps)).rejects.toThrow(VaultDeniedError);
+    const grant = await verifyCardTap(tap("04A1B2C3D4E5F7", 201), deps);
+    expect(await port.activateMemberCard({ userId: "" } as never, grant, null).catch(() => false)).toBe(false);
+    await activateMemberCard(OTHER, t, null, deps).catch(() => undefined);
+    await expect(activateMemberCard(OTHER, t, null, deps)).rejects.toThrow(VaultDeniedError);
+  });
+
+  it("requires the printed activation code when the manifest carried one", async () => {
+    codeBatch = await createSdmBatch(ADMIN, fleetId, "Code batch", { ...deps, random: queue(new Uint8Array(16).fill(0x44)) });
+    expect(await importSdmManifest(ADMIN, fleetId, codeBatch, [{ uid: "04B1B2C3D4E5F6", activationCode: "ABCD-1234" }], deps)).toBe(1);
+    const prevBatch = batchId;
+    batchId = codeBatch;
+    const prevMaster = MASTER.slice();
+    MASTER.fill(0x44);
+    try {
+      await expect(activateMemberCard(MEMBER, tap("04B1B2C3D4E5F6", 1), null, deps)).rejects.toThrow(VaultDeniedError);
+      await expect(activateMemberCard(MEMBER, tap("04B1B2C3D4E5F6", 2), "WRONG-0000", deps)).rejects.toThrow(VaultDeniedError);
+      await activateMemberCard(MEMBER, tap("04B1B2C3D4E5F6", 3), "abcd-1234", deps);
+    } finally {
+      MASTER.set(prevMaster);
+      batchId = prevBatch;
+    }
+  });
+
+  it("lists batches and exports the station file only for admins, without key bytes", async () => {
+    const all = await listSdmBatches(ADMIN, deps);
+    expect(all.map((b) => b.label)).toContain("Test batch 1");
+    expect(await listSdmBatches(MEMBER, deps)).toEqual([]);
+    await expect(exportStationConfig(MEMBER, batchId, "https://rout.be", deps)).rejects.toThrow(VaultDeniedError);
+    const cfg = await exportStationConfig(ADMIN, batchId, "https://rout.be", deps);
+    expect(cfg.ndef.urlTemplate).toBe(`https://rout.be/t?p=${"0".repeat(32)}&m=${"0".repeat(16)}`);
+    const text = JSON.stringify(cfg);
+    for (const key of [META, UID_INDEX, MASTER]) expect(text).not.toContain(hex(key));
+    await expect(asApp(ADMIN, "select * from vault_enclave.sdm_batch_cards", [])).rejects.toThrow(/permission denied/);
   });
 });

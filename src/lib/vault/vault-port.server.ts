@@ -46,6 +46,16 @@ export type SdmTapChallenge = {
 };
 export type SdmTapPurpose = "public_proof" | "step_up";
 export type SdmCardState = "active" | "unactivated";
+export type SdmBatchSummary = {
+  readonly batchId: string;
+  readonly fleetId: string;
+  readonly label: string;
+  readonly createdAt: string;
+  readonly exportedAt: string | null;
+  readonly retiredAt: string | null;
+  readonly cards: number;
+  readonly activeCards: number;
+};
 
 export interface IVaultPort {
   /** Records a just-verified passkey step-up on the enclave's own clock. */
@@ -78,6 +88,12 @@ export interface IVaultPort {
   confirmSdmTap(attemptId: string, tap: SdmTapBytes, verified: boolean, readCounter: number | null): Promise<TapGrant | null>;
   /** Spends a tap_ grant once for one purpose; step_up needs the card owner as caller. */
   consumeSdmTap(caller: VaultCaller | null, grant: TapGrant, purpose: SdmTapPurpose): Promise<SdmCardState | null>;
+  /** Spends a tap_ grant to link an unclaimed card to the caller (db/0246); false on every denial. */
+  activateMemberCard(caller: VaultCaller, grant: TapGrant, activationHash: Uint8Array | null): Promise<boolean>;
+  /** Admin: batches with card counts, no key material. */
+  listSdmBatches(caller: VaultCaller): Promise<SdmBatchSummary[]>;
+  /** Admin: records the one-time station configuration export. */
+  markSdmBatchExported(caller: VaultCaller, batchId: string): Promise<boolean>;
 }
 
 export class VaultDeniedError extends Error {
@@ -354,6 +370,56 @@ export class LocalPostgresVaultAdapter implements IVaultPort {
     const rows = await this.exec(caller ? callerId(caller) : NO_CALLER, "select granted, card_state from vault_enclave.consume_sdm_tap($1, $2)", [grant, purpose]);
     const row = z.object({ granted: z.boolean(), card_state: z.enum(["active", "unactivated"]).nullable() }).safeParse(rows[0]);
     return row.success && row.data.granted && row.data.card_state ? row.data.card_state : null;
+  }
+
+  async activateMemberCard(caller: VaultCaller, grant: TapGrant, activationHash: Uint8Array | null): Promise<boolean> {
+    if (!isTapGrant(grant) || (activationHash !== null && activationHash.length !== 32)) throw new VaultDeniedError();
+    const rows = await this.exec(
+      callerId(caller),
+      "select vault_enclave.activate_member_card($1, case when $2::text is null then null else decode($2, 'hex') end) as ok",
+      [grant, activationHash ? toHex(activationHash) : null],
+    );
+    return rows[0]?.["ok"] === true;
+  }
+
+  async listSdmBatches(caller: VaultCaller): Promise<SdmBatchSummary[]> {
+    const rows = await this.exec(
+      callerId(caller),
+      "select batch_id::text as batch_id, fleet_id::text as fleet_id, label, created_at::text as created_at, exported_at::text as exported_at, retired_at::text as retired_at, cards, active_cards from vault_enclave.list_sdm_batches()",
+      [],
+    );
+    const parsed = z
+      .array(
+        z.object({
+          batch_id: z.string().regex(UUID_RE),
+          fleet_id: z.string().regex(UUID_RE),
+          label: z.string().max(80),
+          created_at: z.string(),
+          exported_at: z.string().nullable(),
+          retired_at: z.string().nullable(),
+          cards: z.number().int().min(0),
+          active_cards: z.number().int().min(0),
+        }),
+      )
+      .max(200)
+      .safeParse(rows);
+    if (!parsed.success) throw new VaultDeniedError();
+    return parsed.data.map((r) => ({
+      batchId: r.batch_id,
+      fleetId: r.fleet_id,
+      label: r.label,
+      createdAt: r.created_at,
+      exportedAt: r.exported_at,
+      retiredAt: r.retired_at,
+      cards: r.cards,
+      activeCards: r.active_cards,
+    }));
+  }
+
+  async markSdmBatchExported(caller: VaultCaller, batchId: string): Promise<boolean> {
+    if (!UUID_RE.test(batchId)) throw new VaultDeniedError();
+    const rows = await this.exec(callerId(caller), "select vault_enclave.mark_sdm_batch_exported($1::uuid) as ok", [batchId]);
+    return rows[0]?.["ok"] === true;
   }
 }
 

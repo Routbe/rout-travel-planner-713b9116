@@ -8,8 +8,8 @@
 - [ ] schema level 0245, snapshot + db types
 ## ROUT Card tap — later batches
 - [ ] step_up purpose (card_tap method for card_reveal / card_lifecycle)
-- [ ] Admin batch screen: create, one-time station config export, manifest import; member activation
+- [x] Admin batch screen (/admin/cards): create, station config export, manifest import; member activation (db/0246, written, not yet applied to Neon)
 
 ## Workspace Studio
 - [ ] New profile photo does not save in Workspace Studio (e.g. maximilien-6yak, private account switched to workspace)
-- [ ] "ROUT OS v2.5 Alle systemen operationeel" overlaps bottom preview buttons on phone; check similar overlaps
+- [x] "ROUT OS v2.5 Alle systemen operationeel" overlaps bottom preview buttons on phone; check similar overlaps
