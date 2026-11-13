@@ -298,9 +298,85 @@ export function stationConfig(batchId: string, origin = "https://rout.be") {
   } as const;
 }
 
-/** Admin: records the export and returns the station configuration. */
-export async function exportStationConfig(adminId: string, batchId: string, origin?: string, deps: Deps = {}) {
+export const SDM_KEYS_FORMAT = "rout-sdm-keys/v1";
+const KEYS_MAGIC = [0x52, 0x53, 0x4b, 0x31] as const; // "RSK1"
+const KEYS_AAD = new TextEncoder().encode(SDM_KEYS_FORMAT);
+
+/** HPKE info: binds the sealed keys to this batch and this one station key. */
+export function sdmExportInfo(batchId: string, fingerprint: Uint8Array): Uint8Array {
+  const label = new TextEncoder().encode("rout-sdm-station/v2");
+  const out = new Uint8Array(label.length + 1 + 16 + 32);
+  out.set(label, 0);
+  out.set(uuidBytes(batchId), label.length + 1);
+  out.set(fingerprint, label.length + 17);
+  return out;
+}
+export const sdmExportAad = () => KEYS_AAD.slice();
+
+/** Admin: registers a station from PEM / base64 SPKI / raw hex; returns id and fingerprint. */
+export async function registerSdmStation(adminId: string, label: string, publicKeyText: string, deps: Deps = {}) {
+  const { parseStationPublicKey, stationFingerprint } = await import("./hpke-p256");
+  let pk: Uint8Array;
+  try {
+    pk = parseStationPublicKey(publicKeyText);
+  } catch {
+    throw new VaultDeniedError();
+  }
+  const stationId = await (deps.port ?? vaultPort()).registerSdmStation({ userId: adminId }, label, pk);
+  return { stationId, fingerprint: toHex(stationFingerprint(pk)) };
+}
+
+export async function listSdmStations(adminId: string, deps: Deps = {}) {
+  const rows = await (deps.port ?? vaultPort()).listSdmStations({ userId: adminId });
+  return rows.map((r) => ({ stationId: r.stationId, label: r.label, fingerprint: toHex(r.fingerprint), createdAt: r.createdAt, retiredAt: r.retiredAt }));
+}
+
+export function retireSdmStation(adminId: string, stationId: string, deps: Deps = {}) {
+  return (deps.port ?? vaultPort()).retireSdmStation({ userId: adminId }, stationId);
+}
+
+/**
+ * Admin: the station bundle. mark_sdm_batch_exported logs the export (with the
+ * station fingerprint) and returns the sealed envelopes in one transaction; the
+ * keys are opened here, HPKE-sealed to the station (P-256, AES-256-GCM) and wiped.
+ * The returned JSON holds only the HPKE ciphertext, never a key byte.
+ */
+export async function exportStationBundle(adminId: string, batchId: string, stationId: string, origin?: string, deps: Deps = {}) {
   const port = deps.port ?? vaultPort();
-  if (!(await port.markSdmBatchExported({ userId: adminId }, batchId))) throw new VaultDeniedError();
-  return stationConfig(batchId, origin);
+  const { hpkeSeal, stationFingerprint, HPKE_AEAD_AES256GCM, HPKE_KDF_SHA256, HPKE_KEM_P256 } = await import("./hpke-p256");
+  const ex = await port.exportSdmBatch({ userId: adminId }, batchId, stationId);
+  if (!ex) throw new VaultDeniedError();
+  const fingerprint = stationFingerprint(ex.stationPublicKey);
+  const portDeps = { ...(deps.port ? { port: deps.port } : {}), ...kekOf(deps) };
+  let fleetPlain: Uint8Array | null = null;
+  let batchPlain: Uint8Array | null = null;
+  const payload = new Uint8Array(4 + 16 + 16 + 16);
+  try {
+    fleetPlain = await openWithServerKey(ex.fleetOwner, "sdm", SDM_FLEET_PURPOSE, ex.fleetEnvelope, portDeps);
+    batchPlain = await openWithServerKey(ex.batchOwner, "sdm", SDM_BATCH_PURPOSE, ex.batchEnvelope, portDeps);
+    payload.set(KEYS_MAGIC, 0);
+    payload.set(uuidBytes(batchId), 4);
+    payload.set(fleetSecrets(fleetPlain).metaReadKey, 20);
+    payload.set(batchMaster(batchPlain), 36);
+    const info = sdmExportInfo(batchId, fingerprint);
+    const sealed = hpkeSeal(ex.stationPublicKey, info, KEYS_AAD, payload);
+    return {
+      ...stationConfig(batchId, origin),
+      keys: {
+        format: SDM_KEYS_FORMAT,
+        hpke: { rfc: "RFC 9180", mode: "base", kemId: HPKE_KEM_P256, kdfId: HPKE_KDF_SHA256, aeadId: HPKE_AEAD_AES256GCM, suite: "DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM" },
+        station: { stationId, fingerprint: toHex(fingerprint) },
+        infoHex: toHex(info),
+        aadHex: toHex(KEYS_AAD),
+        encHex: toHex(sealed.enc),
+        ciphertextHex: toHex(sealed.ciphertext),
+        plaintextLayout: '"RSK1" (4) || batch id (16) || K_SDMMetaRead, key 1 (16) || batch master (16)',
+        diversification: "K_SDMFileRead (key 2) = AN10922 AES-128(batch master, M = UID (7) || batch id (16))",
+      },
+    };
+  } finally {
+    payload.fill(0);
+    fleetPlain?.fill(0);
+    batchPlain?.fill(0);
+  }
 }

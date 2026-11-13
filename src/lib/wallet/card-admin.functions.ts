@@ -33,13 +33,13 @@ export const createCardBatchFn = createServerFn({ method: "POST" })
 
 export const exportCardBatchFn = createServerFn({ method: "POST" })
   .middleware([requireAuth])
-  .inputValidator((d: unknown) => z.object({ batchId: z.string().uuid() }).strict().parse(d))
+  .inputValidator((d: unknown) => z.object({ batchId: z.string().uuid(), stationId: z.string().uuid() }).strict().parse(d))
   .handler(async ({ data, context }) => {
     const { assertAdminRole } = await import("@/lib/admin.server");
     await assertAdminRole(context.userId);
     const { getRequest, setResponseHeader } = await import("@tanstack/react-start/server");
     setResponseHeader("cache-control", "no-store");
-    const { exportStationConfig } = await import("@/lib/vault/sdm-tap.server");
+    const { exportStationBundle } = await import("@/lib/vault/sdm-tap.server");
     // The tap URL is the canonical public origin; the request origin only as a fallback.
     const configured = process.env["PUBLIC_ORIGIN"];
     let origin = new URL(getRequest().url).origin;
@@ -48,7 +48,41 @@ export const exportCardBatchFn = createServerFn({ method: "POST" })
     } catch {
       /* malformed PUBLIC_ORIGIN: keep the request origin */
     }
-    return exportStationConfig(context.userId, data.batchId, origin);
+    // HPKE sealing happens here on the server; only ciphertext crosses the wire.
+    return exportStationBundle(context.userId, data.batchId, data.stationId, origin);
+  });
+
+export const listCardStationsFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    const { assertAdminRole } = await import("@/lib/admin.server");
+    await assertAdminRole(context.userId);
+    const { listSdmStations } = await import("@/lib/vault/sdm-tap.server");
+    return listSdmStations(context.userId);
+  });
+
+export const registerCardStationFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: unknown) => z.object({ label: z.string().trim().min(1).max(80), publicKey: z.string().min(64).max(600) }).strict().parse(d))
+  .handler(async ({ data, context }) => {
+    const { assertAdminRole } = await import("@/lib/admin.server");
+    await assertAdminRole(context.userId);
+    const { registerSdmStation } = await import("@/lib/vault/sdm-tap.server");
+    try {
+      return { ok: true as const, ...(await registerSdmStation(context.userId, data.label, data.publicKey)) };
+    } catch {
+      return { ok: false as const };
+    }
+  });
+
+export const retireCardStationFn = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((d: unknown) => z.object({ stationId: z.string().uuid() }).strict().parse(d))
+  .handler(async ({ data, context }) => {
+    const { assertAdminRole } = await import("@/lib/admin.server");
+    await assertAdminRole(context.userId);
+    const { retireSdmStation } = await import("@/lib/vault/sdm-tap.server");
+    return { ok: await retireSdmStation(context.userId, data.stationId) };
   });
 
 const ManifestSchema = z
