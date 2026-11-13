@@ -17,7 +17,7 @@ export function isFirstPartyAvatarUrl(value: string): boolean {
     const url = new URL(value, "https://rout.be");
     const entries = [...url.searchParams.entries()];
     return !url.hash && entries.length === 1 && entries[0]?.[0] === "path" &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/avatar-\d+\.(jpg|png|webp|gif)$/i.test(entries[0]?.[1] ?? "");
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(avatar|workspace-logo)-\d+\.(jpg|png|webp|gif)$/i.test(entries[0]?.[1] ?? "");
   } catch { return false; }
 }
 

@@ -361,7 +361,7 @@ export function ProfileEditor({ variant = "verified", pageMode = "profile", onPa
           setLegalName(data.verifiedLegalName || null);
           setDisplayName(data.displayName ?? "");
           setTagline(data.tagline ?? "");
-          setAvatarUrl(data.avatarUrl ?? oauthAvatarOf(user) ?? "");
+          setAvatarUrl(data.avatarUrl ?? (isWorkspace ? "" : oauthAvatarOf(user)) ?? "");
           setFaviconUrl(data.faviconUrl ?? "");
           setTheme(data.theme ?? "noir");
           setCardStyle(data.cardStyle ?? "bordered");
